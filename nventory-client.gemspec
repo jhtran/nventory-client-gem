@@ -20,3 +20,7 @@ Gem::Specification.new do |s|
   s.require_paths = ["lib"]
   s.add_dependency('facter')
 end
+
+Gem.post_install do |installer|
+  puts "!!! #{installer.spec.full_name} INSTALLED !!!"
+end
