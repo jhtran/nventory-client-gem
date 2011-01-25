@@ -1,5 +1,5 @@
 module Nventory
   module Client
-    VERSION = "0.0.1"
+    VERSION = "1.65.4"
   end
 end

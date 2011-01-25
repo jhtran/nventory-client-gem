@@ -1,5 +1,5 @@
 module Nventory
   module Client
-    # Your code goes here...
+    require 'nventory'
   end
 end

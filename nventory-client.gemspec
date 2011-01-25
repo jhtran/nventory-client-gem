@@ -6,11 +6,11 @@ Gem::Specification.new do |s|
   s.name        = "nventory-client"
   s.version     = Nventory::Client::VERSION
   s.platform    = Gem::Platform::RUBY
-  s.authors     = ["TODO: Write your name"]
-  s.email       = ["TODO: Write your email address"]
-  s.homepage    = ""
-  s.summary     = %q{TODO: Write a gem summary}
-  s.description = %q{TODO: Write a gem description}
+  s.authors     = ["John Tran"]
+  s.email       = ["jtran@attinteractive.com"]
+  s.homepage    = "http://nventory.sourceforge.net"
+  s.summary     = %q{Client for nVentory}
+  s.description = %q{The client allows you to interface to the nVentory database, to register nodes, retrieve info about nodes or update them.}
 
   s.rubyforge_project = "nventory-client"
 
@@ -18,4 +18,5 @@ Gem::Specification.new do |s|
   s.test_files    = `git ls-files -- {test,spec,features}/*`.split("\n")
   s.executables   = `git ls-files -- bin/*`.split("\n").map{ |f| File.basename(f) }
   s.require_paths = ["lib"]
+  s.add_dependency('facter')
 end
