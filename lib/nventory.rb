@@ -1182,6 +1182,8 @@ class NVentory::Client
         http.ca_path = @ca_path
         http.verify_mode = OpenSSL::SSL::VERIFY_PEER
       end
+      # temp workaround for self signed certs
+      http.verify_mode = OpenSSL::SSL::VERIFY_NONE
     end
     http
   end

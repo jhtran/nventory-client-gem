@@ -1,4 +1,4 @@
-version 1.66.1 of the nVentory ruby client.
+version 1.66.2 of the nVentory ruby client.
 
 You'll need to create an /etc/nventory.conf or $HOME/.nventory.conf with at least the following parameter:
 
