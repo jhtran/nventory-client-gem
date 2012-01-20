@@ -407,7 +407,11 @@ if $nodegroup
   getdata[:includes] = ['child_groups', 'nodes']
   results = nvclient.get_objects(getdata)
   matches =  results.keys.grep(/\b#{$nodegroup}\b/i)
-  matches.size == 1 ? ( $nodegroup = matches.first ) : return
+  if matches.size == 1
+    $nodegroup = matches.first
+  else
+    abort "more than 1 nodegroup matched"
+  end
   puts "Child groups:"
   results[$nodegroup]['child_groups'].sort{|a,b| a['name'] <=> b['name']}.each do |child_group|
     puts "  #{child_group['name']}"
