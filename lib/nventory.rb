@@ -6,12 +6,22 @@ rescue LoadError
   require 'rubygems'
   require 'facter'
 end
+require 'facter/util/memory' # used for converting MB to GB and stuff
 require 'uri'
 require 'net/http'
 require 'net/https'
 require 'cgi'
 require 'rexml/document'
 require 'yaml'
+
+# Only use json gem if its there
+begin
+  require 'rubygems'
+  require 'json'
+  HAS_JSON_GEM = true
+rescue LoadError
+  HAS_JSON_GEM = false
+end
 
 # fix for ruby http bug where it encodes the params incorrectly
 class Net::HTTP::Put
@@ -73,6 +83,7 @@ class NVentory::Client
     @ca_path = nil
     @dhparams = '/etc/nventory/dhparams'
     @delete = false  # Initialize the variable, see attr_accessor above
+    @dmi_data = nil
     
     CONFIG_FILES << configfile if configfile
  
@@ -300,7 +311,18 @@ class NVentory::Client
     # Send the query to the server
     #
 
-    uri = URI::join(@server, "#{objecttype}.xml?#{querystring}")
+    if parms[:format] == 'json'
+      if HAS_JSON_GEM
+        uri = URI::join(@server, "#{objecttype}.json?#{querystring}")
+      else
+        warn "Warning: Cannot use json format because json gem is not installed. Using xml format instead."
+        parms[:format] = 'xml'
+        uri = URI::join(@server, "#{objecttype}.xml?#{querystring}")
+      end
+    else
+      uri = URI::join(@server, "#{objecttype}.xml?#{querystring}")
+    end
+
     req = Net::HTTP::Get.new(uri.request_uri)
     warn "GET URL: #{uri}" if (@debug)
     response = send_request(req, uri, login, password_callback)
@@ -314,26 +336,28 @@ class NVentory::Client
       response.error!
     end
 
-    #
-    # Parse the XML data from the server
-    # This tries to render the XML into the best possible representation
-    # as a Perl hash.  It may need to evolve over time.
-    #
-
-    puts response.body if (@debug)
-    results_xml = REXML::Document.new(response.body)
-    results = {}
-    if results_xml.root.elements["/#{objecttype}"]
-      results_xml.root.elements["/#{objecttype}"].each do |elem|
-        # For some reason Elements[] is returning things other than elements,
-        # like text nodes
-        next if elem.node_type != :element
-        data = xml_to_ruby(elem)
-        name = data['name'] || data['id']
-        if !results[name].nil?
-          warn "Duplicate entries for #{name}. Only one will be shown."
+    if parms[:format] == 'json' 
+      results = JSON.parse(response.body)
+    else
+      #
+      # Parse the XML data from the server
+      # This tries to render the XML into the best possible representation
+      # as a Perl hash.  It may need to evolve over time.
+      puts response.body if (@debug)
+      results_xml = REXML::Document.new(response.body)
+      results = {}
+      if results_xml.root.elements["/#{objecttype}"]
+        results_xml.root.elements["/#{objecttype}"].each do |elem|
+          # For some reason Elements[] is returning things other than elements,
+          # like text nodes
+          next if elem.node_type != :element
+          data = xml_to_ruby(elem)
+          name = data['name'] || data['id']
+          if !results[name].nil?
+            warn "Duplicate entries for #{name}. Only one will be shown."
+          end
+          results[name] = data
         end
-        results[name] = data
       end
     end
 
@@ -541,11 +565,11 @@ class NVentory::Client
       data['operating_system[architecture]'] = Facter['hardwaremodel'].value
     end
     data['kernel_version'] = Facter['kernelrelease'].value
-    if Facter['memorysize'] && Facter['memorysize'].value
-      data['os_memory'] = Facter['memorysize'].value
-    elsif Facter['sp_physical_memory'] && Facter['sp_physical_memory'].value  # Mac OS X
+    if Facter.value('memorysize')
+      data['os_memory'] = Facter.value('memorysize')
+    elsif Facter.value('sp_physical_memory') # Mac OS X
       # More or less a safe bet that OS memory == physical memory on Mac OS X
-      data['os_memory'] = Facter['sp_physical_memory'].value
+      data['os_memory'] = Facter.value('sp_physical_memory')
     end
     if Facter['swapsize']
       data['swap'] = Facter['swapsize'].value
@@ -634,8 +658,10 @@ class NVentory::Client
     data['processor_core_count'] = get_cpu_core_count
     #data['processor_socket_count'] = 
     #data['power_supply_count'] = 
-    #data['physical_memory'] = 
     #data['physical_memory_sizes'] = 
+
+    physical_memory = get_physical_memory
+    data['physical_memory'] = Facter::Memory.scale_number(physical_memory, "MB") if physical_memory
 
     nics = []
     if Facter['interfaces'] && Facter['interfaces'].value
@@ -773,15 +799,27 @@ class NVentory::Client
       end
     end
 
-    # If we failed to find an existing entry based on the unique id
-    # fall back to the hostname.  This may still fail to find an entry,
-    # if this is a new host, but that's OK as it will leave %results
-    # as undef, which triggers set_nodes to create a new entry on the
-    # server.
+    # If we failed to find an existing entry based on the unique id,
+    # fall back to the hostname.  
     if results.empty? && data['name']
       getdata = {} 
       getdata[:objecttype] = 'nodes'
       getdata[:exactget] = {'name' => [data['name']]}
+      getdata[:login] = 'autoreg'
+      results = get_objects(getdata)
+    end
+
+    # If we failed to find an existing entry based on the uniqueid and hostname,
+    # fall back to using serial number. This may still fail to find an entry,
+    # if this is a new host, but that's OK as it will leave %results
+    # as undef, which triggers set_nodes to create a new entry on the
+    # server.
+    if results.empty? && data['serial_number'] &&
+                         !data['serial_number'].empty? &&
+                         data['serial_number'] != "Not Specified"
+      getdata = {}
+      getdata[:objecttype] = 'nodes'
+      getdata[:exactget] = {'serial_number' => [data['serial_number']]}
       getdata[:login] = 'autoreg'
       results = get_objects(getdata)
     end
@@ -900,9 +938,9 @@ class NVentory::Client
       # eliminate duplicates
       merged_nodegroups = child_groups
 
-      if parent_group[child_groups]
-        parent_group[child_groups].each do |child_group|
-          name = child_group[name]
+      if parent_group['child_groups']
+        parent_group['child_groups'].each do |child_group|
+          name = child_group['name']
           merged_nodegroups[name] = child_group
         end
       end
@@ -923,9 +961,9 @@ class NVentory::Client
     # method currently suffers from.
     parent_groups.each_pair do |parent_group_name, parent_group|
       desired_child_groups = {}
-      if parent_groups[child_groups]
-        parent_group[child_groups].each do |child_group|
-          name = child_group[name]
+      if parent_group['child_groups']
+        parent_group['child_groups'].each do |child_group|
+          name = child_group['name']
           if !child_groups.has_key?(name)
             desired_child_groups[name] = child_group
           end
@@ -935,6 +973,7 @@ class NVentory::Client
       set_nodegroup_nodegroup_assignments(desired_child_groups, {parent_group_name => parent_group}, login, password_callback)
     end
   end
+
   # Both arguments are hashes returned by a 'node_groups' call to get_objects
   def set_nodegroup_nodegroup_assignments(child_groups, parent_groups, login, password_callback=PasswordCallback)
     child_ids = []
@@ -993,6 +1032,60 @@ class NVentory::Client
     end
   end
 
+  # Add a new graffiti to given objects. We're assuming that graffiti is a string
+  # of "key:value" format
+  # obj_type is a string that describe the type of the obj (e.g NodeGroup)
+  # obj_hash is the hash returned from calling get_objects
+  def add_graffiti(obj_type, obj_hash, graffiti, login, password_callback=PasswordCallback)
+    name,value = graffiti.split(':')
+    obj_hash.each_value do |obj|
+      set_objects('graffitis', nil,
+        {  :name => name,
+           :value => value,
+           :graffitiable_id => obj['id'],           
+           :graffitiable_type => obj_type,
+        },
+        login, password_callback);
+    end
+  end
+
+  # Delete the graffiti (based on the name) from the given objects
+  # obj_type is a string that describe the type of the obj (e.g NodeGroup)
+  # obj_hash is the hash returned from calling get_objects
+  def delete_graffiti(obj_type, obj_hash, graffiti_name, login, password_callback=PasswordCallback)
+    obj_hash.each_value do |obj|
+      getdata = {:objecttype => 'graffitis',
+                 :exactget => {:name => graffiti_name,
+                               :graffitiable_id => obj['id'],
+                               :graffitiable_type => obj_type}
+                }
+      graffitis_to_delete = get_objects(getdata)
+      delete_objects('graffitis', graffitis_to_delete, login, password_callback)
+    end
+  end
+
+  def get_service_tree(service_name)
+    getdata = {}
+    getdata[:objecttype] = 'services'
+    getdata[:exactget] = {'name' => [service_name]}
+    getdata[:includes] = ['nodes', 'parent_services']
+    services = {service_name => []}
+    results = get_objects(getdata)
+
+    if results.has_key?(service_name)
+      if results[service_name].has_key?('parent_services') && !results[service_name]['parent_services'].empty?
+        results[service_name]['parent_services'].each do |service|
+          services[service_name] << get_service_tree(service['name'])
+        end
+      else
+        return service_name
+      end
+    else # no such service
+      return {}
+    end
+    return services
+  end
+
   #
   # Helper methods
   #
@@ -1039,7 +1132,11 @@ class NVentory::Client
     if uuid_entry
       uuid = uuid_entry.split(":")[1]
     end
-    return uuid.strip
+    if uuid
+      return uuid.strip
+    else
+      return nil
+    end
   end
 
   def self.get_hardware_profile
@@ -1664,8 +1761,7 @@ class NVentory::Client
 
   def getvmstatus
     # facter virtual makes calls to commands that are under /sbin
-    ENV['PATH'] = "#{ENV['PATH']}:/sbin"
-    vmstatus = `facter virtual`
+    vmstatus = Facter.virtual
     vmstatus.chomp!
 
     # extra check to see if we're running kvm hypervisor
@@ -1889,4 +1985,102 @@ class NVentory::Client
     end
     return info
   end
+
+  # Parse dmidecode data and put it into a hash
+  # This method is based on the corresponding method in the perl client
+  def get_dmi_data
+    return @dmi_data if @dmi_data
+
+    case Facter.value(:kernel)
+    when 'Linux'
+      return nil unless FileTest.exists?("/usr/sbin/dmidecode")
+
+      output=%x{/usr/sbin/dmidecode 2>/dev/null}
+    when 'FreeBSD'
+      return nil unless FileTest.exists?("/usr/local/sbin/dmidecode")
+
+      output=%x{/usr/local/sbin/dmidecode 2>/dev/null}
+    when 'NetBSD'
+      return nil unless FileTest.exists?("/usr/pkg/sbin/dmidecode")
+   
+      output=%x{/usr/pkg/sbin/dmidecode 2>/dev/null}
+    when 'SunOS'
+      return nil unless FileTest.exists?("/usr/sbin/smbios")
+
+      output=%x{/usr/sbin/smbios 2>/dev/null}
+    else
+      warn "Can't get dmi_data because of unsupported OS"
+      return
+    end
+
+    look_for_section_name = false
+    dmi_section = nil
+    dmi_section_data = {}
+    dmi_section_array = nil 
+    @dmi_data = {}
+
+    output.split("\n").each do |line|
+      if line =~ /^Handle/
+        if dmi_section && !dmi_section_data.empty?
+          @dmi_data[dmi_section] ||= []
+          @dmi_data[dmi_section] << dmi_section_data
+        end
+        dmi_section = nil
+        dmi_section_data = {}
+        dmi_section_array = nil
+        look_for_section_name = true
+      elsif look_for_section_name
+        next if line =~ /^\s*DMI type/
+        if line =~ /^\s*(.*)/
+          dmi_section = $1
+          look_for_section_name = false
+        end
+      elsif dmi_section && line =~ /^\s*([^:]+):\s*(\S.*)/
+        dmi_section_data[$1] = $2;
+        dmi_section_array = nil
+      elsif dmi_section && line =~ /^\s*([^:]+):$/
+        dmi_section_array = $1
+      elsif dmi_section && dmi_section_array && line =~ /^\s*(\S.+)$/
+        dmi_section_data[dmi_section_array] ||= []
+        dmi_section_data[dmi_section_array] << $1
+      end
+    end
+    @dmi_data
+  end  
+
+  # This method is based on the one in the perl client
+  def get_physical_memory
+    # only support Linux and FreeBSD right now
+    os = Facter['kernel']
+    return if os.nil? or (os.value != 'Linux' and os.value != 'FreeBSD')
+
+    physical_memory = 0
+    dmi_data = get_dmi_data
+
+    return if dmi_data.nil? or dmi_data['Memory Device'].nil?
+
+    dmi_data['Memory Device'].each do |mem_dev|
+
+      size = mem_dev['Size']
+      form_factor = mem_dev['Form Factor']
+      locator = mem_dev['Locator']
+      # Some systems report little chunks of memory other than
+      # main system memory as Memory Devices, the 'DIMM' as
+      # form factor seems to indicate main system memory.
+      # Unfortunately some DIMMs are reported with a form
+      # factor of '<OUT OF SPEC>'.  In that case fall back to
+      # checking for signs of it being a DIMM in the locator
+      # field. 
+      if (size != 'No Module Installed' &&
+            ((form_factor == 'DIMM' || form_factor == 'FB-DIMM' || form_factor == 'SODIMM') ||
+             (form_factor == '<OUT OF SPEC>' && locator =~ /DIMM/)))
+        megs, units = size.split(' ')
+
+        next if units != 'MB'
+        physical_memory += megs.to_i;
+      end
+    end
+    physical_memory
+  end
+
 end
