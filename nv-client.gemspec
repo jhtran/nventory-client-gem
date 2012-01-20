@@ -4,7 +4,7 @@ require "nv-client/version"
 
 Gem::Specification.new do |s|
   s.name        = "nv-client"
-  s.version     = Nventory::Client::VERSION
+  s.version     = Nv::Client::VERSION
   s.platform    = Gem::Platform::RUBY
   s.authors     = ["John Tran"]
   s.email       = ["jt708u@att.com"]
